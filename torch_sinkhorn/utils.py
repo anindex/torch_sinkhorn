@@ -20,9 +20,10 @@ def kl(p: torch.Tensor, q: torch.Tensor) -> float:
 
 
 def gen_kl(p: torch.Tensor, q: torch.Tensor) -> float:
-    p = p.flatten()
-    q = q.flatten()
-    return p @ (safe_log(p) - safe_log(q)) + torch.sum(q) - torch.sum(p)
+    p = p.flatten(-2, -1)
+    q = q.flatten(-2, -1)
+    term1 = torch.einsum("...i,...i->...", p, safe_log(p) - safe_log(q))
+    return term1 + torch.sum(q, dim=-1) - torch.sum(p, dim=-1)
 
 
 def gen_js(p: torch.Tensor, q: torch.Tensor, c: float = 0.5) -> float:
@@ -33,7 +34,6 @@ def softmin(
     x: torch.Tensor, gamma: float, dim: Optional[int] = None
 ) -> torch.Tensor:
     return -gamma * torch.logsumexp(x / -gamma, dim=dim)
-
 
 
 def sort_and_argsort(

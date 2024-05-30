@@ -228,11 +228,11 @@ class SinkhornOutput():
     def kl_reg_cost(self) -> float:
         return self.kl_reg_ot_cost
 
-    # @property  # NOTE(an): not compatible with batch
-    # def ent_reg_cost(self) -> float:
-    #     ent_a = torch.sum(torch.special.entr(self.ot_prob.a))
-    #     ent_b = torch.sum(torch.special.entr(self.ot_prob.b))
-    #     return self.kl_reg_ot_cost - self.epsilon * (ent_a + ent_b)
+    @property
+    def ent_reg_cost(self) -> float:
+        ent_a = torch.sum(torch.special.entr(self.ot_prob.a), dim=-1)
+        ent_b = torch.sum(torch.special.entr(self.ot_prob.b), dim=-1)
+        return self.kl_reg_ot_cost - self.epsilon * (ent_a + ent_b)
 
     @property
     def kl_reg_cost(self) -> float:

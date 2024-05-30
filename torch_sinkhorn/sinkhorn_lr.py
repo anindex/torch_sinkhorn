@@ -15,7 +15,7 @@ import torch
 from torch_sinkhorn.initializer_lr import LRInitializer, RandomInitializer, Rank2Initializer
 from torch_sinkhorn.problem import LinearProblem
 from torch_sinkhorn.sinkhorn import Sinkhorn
-from torch_sinkhorn.utils import safe_log, gen_js, gen_kl, kl, softmin, sort_and_argsort
+from torch_sinkhorn.utils import safe_log, gen_js, gen_kl
 
 
 class LRSinkhornState():
@@ -40,7 +40,7 @@ class LRSinkhornState():
 
     def compute_error(
         self, previous_state: "LRSinkhornState"
-    ) -> float:
+    ) -> torch.Tensor:
         err_q = gen_js(self.q, previous_state.q, c=1.0)
         err_r = gen_js(self.r, previous_state.r, c=1.0)
         err_g = gen_js(self.g, previous_state.g, c=1.0)
@@ -53,7 +53,7 @@ class LRSinkhornState():
         *,
         epsilon: float,
         use_danskin: bool = False
-    ) -> float:
+    ) -> torch.Tensor:
         return compute_ent_reg_ot_cost(
             self.q,
             self.r,
@@ -76,11 +76,11 @@ def compute_ent_reg_ot_cost(
     ot_prob: LinearProblem,
     epsilon: float,
     use_danskin: bool = False
-) -> float:
+) -> torch.Tensor:
 
     def ent(x: torch.Tensor) -> float:
         # generalized entropy
-        return torch.sum(torch.special.entr(x) + x)
+        return torch.sum(torch.special.entr(x) + x, dim=(-2, -1))
 
     tau_a, tau_b = ot_prob.tau_a, ot_prob.tau_b
 
@@ -88,12 +88,13 @@ def compute_ent_reg_ot_cost(
     r = r.detach() if use_danskin else r
     g = g.detach() if use_danskin else g
 
-    cost = torch.sum((ot_prob.C @ r) * q * (1.0 / g)[None, :])
+    C_r = torch.einsum("...ij,...jk->...ik", ot_prob.C, r)
+    cost = torch.sum(C_r * q * (1.0 / g)[..., None, :], dim=(-2, -1))
     cost -= epsilon * (ent(q) + ent(r) + ent(g))
     if tau_a != 1.0:
-        cost += tau_a / (1.0 - tau_a) * gen_kl(torch.sum(q, dim=1), ot_prob.a)
+        cost += tau_a / (1.0 - tau_a) * gen_kl(torch.sum(q, dim=-1), ot_prob.a)
     if tau_b != 1.0:
-        cost += tau_b / (1.0 - tau_b) * gen_kl(torch.sum(r, dim=1), ot_prob.b)
+        cost += tau_b / (1.0 - tau_b) * gen_kl(torch.sum(r, dim=-1), ot_prob.b)
 
     return cost
 
@@ -102,9 +103,9 @@ def solution_error(
     q: torch.Tensor, r: torch.Tensor, ot_prob: LinearProblem,
     norm_error: int = 2
 ) -> torch.Tensor:
-    err = torch.norm(torch.sum(q, dim=1) - ot_prob.a, p=norm_error)
-    err += torch.norm(torch.sum(r, dim=1) - ot_prob.b, p=norm_error)
-    err += torch.norm(torch.sum(q, dim=0) - torch.sum(r, dim=0), p=norm_error)
+    err = torch.norm(torch.sum(q, dim=-1) - ot_prob.a, p=norm_error, dim=-1)
+    err += torch.norm(torch.sum(r, dim=-1) - ot_prob.b, p=norm_error, dim=-1)
+    err += torch.norm(torch.sum(q, dim=-2) - torch.sum(r, dim=-2), p=norm_error, dim=-1)
     return err
 
 
@@ -141,25 +142,26 @@ class LRSinkhornOutput():
         return self.ot_prob.b
 
     @property
-    def n_iters(self) -> int:
-        return torch.sum(self.errors != -1) * self.inner_iterations
+    def n_iters(self) -> torch.Tensor:
+        return torch.sum(self.errors != -1, dim=-1) * self.inner_iterations
 
     @property
-    def converged(self) -> bool:
-        return torch.any(self.costs == -1) and torch.all(torch.isfinite(self.costs))
+    def converged(self) -> torch.Tensor:
+        return torch.any(self.costs == -1, dim=-1) and torch.all(torch.isfinite(self.costs), dim=-1)
 
     @property
     def matrix(self) -> torch.Tensor:
-        return (self.q * self._inv_g) @ self.r.T
+        return torch.einsum("...ij,...jk->...ik", self.q * self._inv_g[..., None, :], self.r.mT)
 
-    def apply(self, inputs: torch.Tensor, dim: int = 0) -> torch.Tensor:
-        q, r = (self.q, self.r) if dim == 1 else (self.r, self.q)
-        # for `dim=0`: (batch, m), (m, r), (r,), (r, n)
-        return ((inputs @ r) * self._inv_g) @ q.T
+    def apply(self, inputs: torch.Tensor, dim: int = -2) -> torch.Tensor:
+        q, r = (self.q, self.r) if dim == -1 else (self.r, self.q)
+        i_r = torch.einsum("...ij,...jk->...ik", inputs, r)
+        return torch.einsum("...ij,...jk->...ik", i_r * self._inv_g, q.mT)
 
     def marginal(self, dim: int) -> torch.Tensor:
-        length = self.q.shape[0] if dim == 0 else self.r.shape[0]
-        return self.apply(torch.ones(length,).type_as(self.q), dim=dim)
+        batch_dim = self.q.shape[:-2]
+        length = self.q.shape[-2] if dim == -2 else self.r.shape[-2]
+        return self.apply(torch.ones(batch_dim + (length,)).type_as(self.q), dim=dim)
 
     @property
     def ent_reg_cost(self) -> float:
@@ -167,7 +169,7 @@ class LRSinkhornOutput():
 
     @property
     def transport_mass(self) -> float:
-        return self.marginal(0).sum()
+        return self.marginal(-2).sum(dim=-1)
 
     @property
     def _inv_g(self) -> torch.Tensor:
@@ -184,6 +186,7 @@ class LRSinkhorn(Sinkhorn):
         gamma_rescale: bool = True,
         epsilon: float = 0.0,
         threshold: float = 1e-3,
+        min_iterations: int = 1,
         inner_iterations: int = 1,
         max_iterations: int = 50,
         kwargs_dys: Optional[Mapping[str, Any]] = None,
@@ -195,7 +198,7 @@ class LRSinkhorn(Sinkhorn):
     ):
         super().__init__(threshold=threshold,
                          inner_iterations=inner_iterations,
-                         min_iterations=2 * inner_iterations,
+                         min_iterations=max(2 * inner_iterations, min_iterations),
                          max_iterations=max_iterations,
                          **kwargs)
         self.lse_mode = lse_mode
@@ -243,12 +246,13 @@ class LRSinkhorn(Sinkhorn):
             safe_log(state.q), safe_log(state.r), safe_log(state.g)
         )
 
-        inv_g = 1.0 / state.g[None, :]
-        tmp = ot_prob.C @ state.r
+        inv_g = 1.0 / state.g[..., None, :]
+        tmp = torch.einsum("...ij,...jk->...ik", ot_prob.C, state.r)
 
         grad_q = tmp * inv_g
-        grad_r = ot_prob.C.mT @ state.q * inv_g
-        grad_g = -torch.sum(state.q * tmp, dim=0) / (state.g ** 2)
+        C_q = torch.einsum("...ij,...jk->...ik", ot_prob.C.mT, state.q)
+        grad_r = C_q * inv_g
+        grad_g = -torch.sum(state.q * tmp, dim=-2) / (state.g ** 2)
 
         grad_q += self.epsilon * log_q
         grad_r += self.epsilon * log_r
@@ -285,29 +289,30 @@ class LRSinkhorn(Sinkhorn):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r = self.rank
         n, m = ot_prob.C.shape[-2:]
+        batch_dim = c_q.shape[:-2]
         loga, logb = torch.log(ot_prob.a), torch.log(ot_prob.b)
-        err = torch.inf
+        err = torch.tensor(torch.inf)
         h_old = h
-        g1_old, g2_old = torch.zeros(r).type_as(loga), torch.zeros(r).type_as(loga)
-        f1, f2 = torch.zeros(n).type_as(loga), torch.zeros(m).type_as(loga)
+        g1_old, g2_old = torch.zeros(batch_dim + (r,)).type_as(loga), torch.zeros(batch_dim + (r,)).type_as(loga)
+        f1, f2 = torch.zeros(batch_dim + (n,)).type_as(loga), torch.zeros(batch_dim + (m,)).type_as(loga)
         w_gi, w_gp = torch.zeros_like(g1_old), torch.zeros_like(g1_old)
         w_q, w_r = torch.zeros_like(g1_old), torch.zeros_like(g1_old)
 
         def _softm(f: torch.Tensor, g: torch.Tensor, c: torch.Tensor, dim: int) -> torch.Tensor:
-            return torch.logsumexp(gamma * (f[:, None] + g[None, :] - c), dim=dim)
+            return torch.logsumexp(gamma * (f[..., :, None] + g[..., None, :] - c), dim=dim)
 
         i = 0
         while i < max_iter:
-            if i >= min_iter and err < tolerance:
+            if i >= min_iter and (err < tolerance).all():
                 break
             # First Projection
             f1 = torch.where(
                 torch.isfinite(loga),
-                (loga - _softm(f1, g1_old, c_q, dim=1)) / gamma + f1, loga
+                (loga - _softm(f1, g1_old, c_q, dim=-1)) / gamma + f1, loga
             )
             f2 = torch.where(
                 torch.isfinite(logb),
-                (logb - _softm(f2, g2_old, c_r, dim=1)) / gamma + f2, logb
+                (logb - _softm(f2, g2_old, c_r, dim=-1)) / gamma + f2, logb
             )
 
             h = h_old + w_gi
@@ -315,8 +320,8 @@ class LRSinkhorn(Sinkhorn):
             w_gi += h_old - h
             h_old = h
             # Update couplings
-            g_q = _softm(f1, g1_old, c_q, dim=0)
-            g_r = _softm(f2, g2_old, c_r, dim=0)
+            g_q = _softm(f1, g1_old, c_q, dim=-2)
+            g_r = _softm(f2, g2_old, c_r, dim=-2)
             # Second Projection
             h = (1.0 / 3.0) * (h_old + w_gp + w_q + w_r)
             h += g_q / (3.0 * gamma)
@@ -328,14 +333,14 @@ class LRSinkhorn(Sinkhorn):
             w_r = w_r + g2_old - g2
             w_gp = h_old + w_gp - h
 
-            q = torch.exp(gamma * (f1[:, None] + g1[None, :] - c_q))
-            r = torch.exp(gamma * (f2[:, None] + g2[None, :] - c_r))
+            q = torch.exp(gamma * (f1[..., :, None] + g1[..., None, :] - c_q))
+            r = torch.exp(gamma * (f2[..., :, None] + g2[..., None, :] - c_r))
 
             g1_old = g1
             g2_old = g2
             h_old = h
 
-            err = solution_error(q, r, ot_prob).item()
+            err = solution_error(q, r, ot_prob)
             i += 1
         g = torch.exp(gamma * h)
         return q, r, g
@@ -354,30 +359,33 @@ class LRSinkhorn(Sinkhorn):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r = self.rank
         n, m = ot_prob.C.shape[-2:]
+        batch_dim = ot_prob.C.shape[:-2]
         a, b = ot_prob.a, ot_prob.b
         supp_a, supp_b = a > 0, b > 0
-        err = torch.inf
+        err = torch.tensor(torch.inf)
 
         g_old = k_g
-        v1_old, v2_old = torch.ones(r).type_as(a), torch.ones(r).type_as(a)
-        u1, u2 = torch.ones(n).type_as(a), torch.ones(m).type_as(a)
+        v1_old, v2_old = torch.ones(batch_dim + (r,)).type_as(a), torch.ones(batch_dim + (r,)).type_as(a)
+        u1, u2 = torch.ones(batch_dim + (n,)).type_as(a), torch.ones(batch_dim + (m,)).type_as(a)
 
-        q_gi, q_gp = torch.ones(r).type_as(a), torch.ones(r).type_as(a)
+        q_gi, q_gp = torch.ones_like(v1_old), torch.ones_like(v2_old)
         q_q, q_r = torch.ones_like(q_gi), torch.ones_like(q_gp)
 
         i = 0
         while i < max_iter:
-            if i >= min_iter and err < tolerance:
+            if i >= min_iter and (err < tolerance).all():
                 break
             # First Projection
-            u1 = torch.where(supp_a, a / (k_q @ v1_old), 0.0)
-            u2 = torch.where(supp_b, b / (k_r @ v2_old), 0.0)
+            kq_v = torch.einsum("...ij,...j->...i", k_q, v1_old)
+            kr_v = torch.einsum("...ij,...j->...i", k_r, v2_old)
+            u1 = torch.where(supp_a, a / kq_v, 0.0)
+            u2 = torch.where(supp_b, b / kr_v, 0.0)
             g = torch.clip(g_old * q_gi, min=min_entry_value)
             q_gi = (g_old * q_gi) / g
             g_old = g
             # Second Projection
-            v1_trans = k_q.T @ u1
-            v2_trans = k_r.T @ u2
+            v1_trans = torch.einsum("...ij,...j->...i", k_q.mT, u1)
+            v2_trans = torch.einsum("...ij,...j->...i", k_r.mT, u2)
             g = (g_old * q_gp * v1_old * q_q * v1_trans * v2_old * q_r *
                 v2_trans) ** (1 / 3)
             v1 = g / v1_trans
@@ -389,9 +397,9 @@ class LRSinkhorn(Sinkhorn):
             v2_old = v2
             g_old = g
 
-            q = u1.reshape((-1, 1)) * k_q * v1.reshape((1, -1))
-            r = u2.reshape((-1, 1)) * k_r * v2.reshape((1, -1))
-            err = solution_error(q, r, ot_prob).item()
+            q = u1[..., :, None] * k_q * v1[..., None, :]
+            r = u2[..., :, None] * k_r * v2[..., None, :]
+            err = solution_error(q, r, ot_prob)
             i += 1
         return q, r, g
 
@@ -447,9 +455,9 @@ class LRSinkhorn(Sinkhorn):
             else:
                 cost = -1
                 error = -1
-            state.crossed_threshold = state.crossed_threshold or (state.errors[it - 1] >= self.threshold and error < self.threshold)
-            state.costs[it] = cost
-            state.errors[it] = error
+            state.crossed_threshold = state.crossed_threshold or ((state.errors[..., it - 1] >= self.threshold).all() and (error < self.threshold).all())
+            state.costs[..., it] = cost
+            state.errors[..., it] = error
         return state
 
     def iterations(
@@ -469,13 +477,14 @@ class LRSinkhorn(Sinkhorn):
     ) -> LRSinkhornState:
         q, r, g = init
         total_size = np.ceil(self.max_iterations / self.inner_iterations).astype(int)
+        batch_dim = q.shape[:-2]
         return LRSinkhornState(
             q=q,
             r=r,
             g=g,
             gamma=self.gamma,
-            costs=-torch.ones(total_size).type_as(q),
-            errors=-torch.ones(total_size).type_as(q)
+            costs=-torch.ones(batch_dim + (total_size,)).type_as(q),
+            errors=-torch.ones(batch_dim + (total_size,)).type_as(q)
         )
 
     def output_from_state(
@@ -497,19 +506,19 @@ class LRSinkhorn(Sinkhorn):
             return False
         crossed = state.crossed_threshold
         it = iteration // self.inner_iterations
-        prev_error, curr_error = state.errors[it - 2], state.errors[it - 1]
+        prev_error, curr_error = state.errors[..., it - 2], state.errors[..., it - 1]
         if crossed:
-            if prev_error < self.threshold and curr_error < self.threshold:
+            if (prev_error < self.threshold).all() and (curr_error < self.threshold).all():
                 return True
         else:
-            if prev_error < self.threshold and curr_error < prev_error:
+            if (prev_error < self.threshold).all() and (curr_error < prev_error).all():
                 return True
         return False
 
     def _diverged(self, state: LRSinkhornState, iteration: int) -> bool:
         it = iteration // self.inner_iterations
-        err = torch.isinf(state.errors[it - 1]) or torch.isnan(state.errors[it - 1])
-        cost = torch.isinf(state.costs[it - 1]) or torch.isnan(state.costs[it - 1])
+        err = torch.isinf(state.errors[..., it - 1]).any() or torch.isnan(state.errors[..., it - 1]).any()
+        cost = torch.isinf(state.costs[..., it - 1]).any() or torch.isnan(state.costs[..., it - 1]).any()
         return err or cost
 
     def _continue(self, state: LRSinkhornState, iteration: int) -> bool:
@@ -520,20 +529,35 @@ class LRSinkhorn(Sinkhorn):
 if __name__ == "__main__":
     from torch_sinkhorn.problem import Epsilon
     from torch_robotics.torch_utils.torch_timer import TimerCUDA
+    batch = 32
     epsilon = Epsilon(target=0.05, init=1., decay=0.8)
     ot_prob = LinearProblem(
-        torch.rand((1000, 1000)), epsilon
+        torch.rand((batch, 100, 100)), epsilon
     )
-    sinkhorn = LRSinkhorn(rank=2, lse_mode=False, inner_iterations=2)
+    sinkhorn = LRSinkhorn(rank=2, min_iterations=50, max_iterations=50, lse_mode=False, inner_iterations=1)
     with TimerCUDA() as t:
         W, state = sinkhorn(ot_prob)
     print(t.elapsed)
     print(f"Converged at {state.converged_at}")
     import matplotlib.pyplot as plt
     plt.figure()
-    plt.plot(W.errors)
+    mean_errors = torch.mean(state.errors, dim=0)
+    var_errors = torch.var(state.errors, dim=0)
+    plt.errorbar(
+        torch.arange(mean_errors.shape[-1]),
+        mean_errors,
+        yerr=var_errors,
+        label="error"
+    )
     plt.figure()
-    plt.plot(W.costs)
+    mean_costs = torch.mean(state.costs, dim=0)
+    var_costs = torch.var(state.costs, dim=0)
+    plt.errorbar(
+        torch.arange(mean_costs.shape[-1]),
+        mean_costs,
+        yerr=var_costs,
+        label="cost"
+    )
     plt.figure()
-    plt.imshow(W.matrix.cpu().numpy())
+    plt.imshow(W.matrix.mean(0).cpu().numpy())
     plt.show()
