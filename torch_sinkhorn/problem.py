@@ -80,8 +80,9 @@ class LinearProblem():
         scale_cost: Union[int, float, Literal["mean", "max_cost", "median"]] = 'max_cost',
     ) -> None:
         self._epsilon = epsilon
-        self.a = a if a is not None else (torch.ones(C.shape[0]).type_as(C) / C.shape[0])
-        self.b = b if b is not None else (torch.ones(C.shape[1]).type_as(C) / C.shape[1])
+        batch_dim = C.shape[:-2]
+        self.a = a if a is not None else (torch.ones(batch_dim + (C.shape[-2],)).type_as(C) / C.shape[-2])
+        self.b = b if b is not None else (torch.ones(batch_dim + (C.shape[-1],)).type_as(C) / C.shape[-1])
         self.tau_a = tau_a
         self.tau_b = tau_b
         self._kernel_matrix = None
@@ -101,22 +102,22 @@ class LinearProblem():
             self,
             u: torch.Tensor,
             v: torch.Tensor,
-            dim: int = 0,
+            dim: int = -2,
         ) -> torch.Tensor:
             """Output marginal of transportation matrix from scalings."""
-            u, v = (v, u) if dim == 0 else (u, v)
+            u, v = (v, u) if dim == -2 else (u, v)
             return u * self.apply_kernel(v, dim=dim)
 
     def marginal_from_potentials(
-        self, f: torch.Tensor, g: torch.Tensor, dim: int = 0
+        self, f: torch.Tensor, g: torch.Tensor, dim: int = -2
     ) -> torch.Tensor:
-        h = (f if dim == 1 else g)
+        h = (f if dim == -1 else g)
         z = self.apply_lse_kernel(f, g, self.epsilon, dim=dim)
         return torch.exp((z + h) / self.epsilon)
 
     def update_potential(
         self, f: torch.Tensor, g: torch.Tensor, log_marginal: torch.Tensor,
-        iteration: int = None, dim: int = 0,
+        iteration: int = None, dim: int = -2,
     ) -> torch.Tensor:
         app_lse = self.apply_lse_kernel(f, g, self.epsilon, dim=dim)
         return self.epsilon * log_marginal - torch.where(torch.isfinite(app_lse), app_lse, 0)
@@ -126,7 +127,7 @@ class LinearProblem():
         scaling: torch.Tensor,
         marginal: torch.Tensor,
         iteration: Optional[int] = None,
-        dim: int = 0,
+        dim: int = -2,
     ) -> torch.Tensor:
         eps = self._epsilon.at(iteration) if isinstance(self._epsilon, Epsilon) else self._epsilon
         app_kernel = self.apply_kernel(scaling, eps, dim=dim)
@@ -142,30 +143,30 @@ class LinearProblem():
         self, u: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
         """Output transport matrix from pair of scalings."""
-        return self.K * u[:, None] * v[None, :]
+        return self.K * u[..., :, None] * v[..., None, :]
 
     def apply_kernel(
             self,
             scaling: torch.Tensor,
             eps: Optional[float] = None,
-            dim: int = 0,
+            dim: int = -2,
         ) -> torch.Tensor:
             if eps is None:
                 kernel = self.K
             else:
                 kernel = self.K ** (self.epsilon / eps)
-            kernel = kernel if dim == 1 else kernel.mT
-            return kernel @ scaling
+            kernel = kernel if dim == -1 else kernel.mT
+            return torch.einsum("...ij,...j->...i", kernel, scaling)
 
     def apply_lse_kernel(
         self, f: torch.Tensor, g: torch.Tensor, eps: float, dim: int
     ) -> torch.Tensor:
         w_res = self._softmax(f, g, eps, dim=dim)
-        remove = f if dim == 1 else g
+        remove = f if dim == -1 else g
         return w_res - torch.where(torch.isfinite(remove), remove, 0)
 
     def _center(self, f: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
-        return f.unsqueeze(1) + g.unsqueeze(0) - self.C
+        return f[..., :, None] + g[..., None, :] - self.C
 
     def _softmax(
         self, f: torch.Tensor, g: torch.Tensor, eps: float, dim: int
@@ -193,15 +194,15 @@ class LinearProblem():
         return self._kernel_matrix ** self.inv_scale_cost
 
     @property
-    def inv_scale_cost(self) -> float:
+    def inv_scale_cost(self) -> torch.Tensor:
         if isinstance(self._scale_cost, (int, float, np.number)):
             return 1.0 / self._scale_cost
         if self._scale_cost == "max_cost":
             return 1.0 / nanmax(self._cost_matrix)
         if self._scale_cost == "mean":
-            return 1.0 / torch.nanmean(self._cost_matrix)
+            return 1.0 / torch.nanmean(self._cost_matrix, dim=(-2, -1), keepdim=True)
         if self._scale_cost == "median":
-            return 1.0 / torch.nanmedian(self._cost_matrix)
+            return 1.0 / torch.nanmedian(self._cost_matrix, dim=(-2, -1), keepdim=True)
         raise ValueError(f"Scaling {self._scale_cost} not implemented.")
 
     @property

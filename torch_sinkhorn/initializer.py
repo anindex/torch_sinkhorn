@@ -16,7 +16,7 @@ class SinkhornInitializer(abc.ABC):
         """Initialize Sinkhorn potential f_u.
 
         Returns:
-        potential size ``[n,]``.
+        potential size ``[..., n,]``.
         """
 
     @abc.abstractmethod
@@ -27,7 +27,7 @@ class SinkhornInitializer(abc.ABC):
         """Initialize Sinkhorn potential g_v.
 
         Returns:
-        potential size ``[m,]``.
+        potential size ``[..., m,]``.
         """
 
     def __call__(
@@ -37,18 +37,14 @@ class SinkhornInitializer(abc.ABC):
         b: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        n, m = ot_prob.C.shape
+        n, m = ot_prob.C.shape[-2:]
         if a is None:
             a = self.init_dual_a(ot_prob)
         if b is None:
             b = self.init_dual_b(ot_prob)
 
-        assert a.shape == (
-            n,
-        ), f"Expected `f_u` to have shape `{n,}`, found `{a.shape}`."
-        assert b.shape == (
-            m,
-        ), f"Expected `g_v` to have shape `{m,}`, found `{b.shape}`."
+        assert a.shape[-1] == n, f"Expected `f_u` to have shape `{..., n}`, found `{a.shape}`."
+        assert b.shape[-1] == m, f"Expected `g_v` to have shape `{..., m}`, found `{b.shape}`."
 
         a = torch.where(ot_prob.a > 0., a, -torch.inf)
         b = torch.where(ot_prob.b > 0., b, -torch.inf)

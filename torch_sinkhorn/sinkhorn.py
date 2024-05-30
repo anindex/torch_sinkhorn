@@ -17,10 +17,10 @@ from torch_sinkhorn.initializer import DefaultInitializer, RandomInitializer, Si
 from torch_sinkhorn.utils import safe_log
 
 
-def logsumexp(x: torch.Tensor, b: torch.Tensor = None) -> torch.Tensor:
+def logsumexp(x: torch.Tensor, b: torch.Tensor = None, dim: Tuple[int] = None) -> torch.Tensor:
     if b is None:
         b = torch.ones_like(x)
-    return safe_log(torch.sum(b * torch.exp(x)))
+    return safe_log(torch.sum(b * torch.exp(x), dim=dim))
 
 
 def phi_star(h: torch.Tensor, rho: float) -> torch.Tensor:
@@ -53,7 +53,7 @@ def solution_error(
 ) -> torch.Tensor:
     if ot_prob.is_balanced and not parallel_dual_updates:
         return marginal_error(
-            fu, gv, ot_prob.b, ot_prob, dim=0, lse_mode=lse_mode
+            fu, gv, ot_prob.b, ot_prob, dim=-2, lse_mode=lse_mode
         )
 
     grad_a = grad_of_marginal_fit(
@@ -63,8 +63,8 @@ def solution_error(
         ot_prob.b, gv, ot_prob.tau_b, ot_prob.epsilon
     )
 
-    err = marginal_error(fu, gv, grad_a, ot_prob, dim=1, lse_mode=lse_mode)
-    err += marginal_error(fu, gv, grad_b, ot_prob, dim=0, lse_mode=lse_mode)
+    err = marginal_error(fu, gv, grad_a, ot_prob, dim=-1, lse_mode=lse_mode)
+    err += marginal_error(fu, gv, grad_b, ot_prob, dim=-2, lse_mode=lse_mode)
     return err
 
 
@@ -73,7 +73,7 @@ def marginal_error(
     gv: torch.Tensor,
     target: torch.Tensor,
     ot_prob: LinearProblem,
-    dim: int = 0,
+    dim: int = -2,
     norm: int = 2,
     lse_mode: bool = True
 ) -> torch.Tensor:
@@ -82,7 +82,7 @@ def marginal_error(
     else:
         marginal = ot_prob.marginal_from_scalings(fu, gv, dim=dim)
     # distance between target and marginal
-    return torch.norm(marginal - target, p=norm)
+    return torch.norm(marginal - target, p=norm, dim=-1)
 
 
 def compute_kl_reg_ot_cost(
@@ -91,7 +91,7 @@ def compute_kl_reg_ot_cost(
     ot_prob: LinearProblem, 
     lse_mode: bool = True,
     use_danskin: bool = False
-) -> float:
+) -> torch.Tensor:
     f = f.detach() if use_danskin else f
     g = g.detach() if use_danskin else g
 
@@ -99,29 +99,31 @@ def compute_kl_reg_ot_cost(
     supp_b = ot_prob.b > 0
     fa = ot_prob.potential_from_scaling(ot_prob.a)
     if ot_prob.tau_a == 1.0:
-        div_a = torch.sum(torch.where(supp_a, ot_prob.a * (f - fa), 0.0))
+        div_a = torch.sum(torch.where(supp_a, ot_prob.a * (f - fa), 0.0), dim=-1)
     else:
         rho_a = rho(ot_prob.epsilon, ot_prob.tau_a)
         div_a = -torch.sum(
-            torch.where(supp_a, ot_prob.a * phi_star(-(f - fa), rho_a), 0.0)
+            torch.where(supp_a, ot_prob.a * phi_star(-(f - fa), rho_a), 0.0),
+            dim=-1,
         )
 
     gb = ot_prob.potential_from_scaling(ot_prob.b)
     if ot_prob.tau_b == 1.0:
-        div_b = torch.sum(torch.where(supp_b, ot_prob.b * (g - gb), 0.0))
+        div_b = torch.sum(torch.where(supp_b, ot_prob.b * (g - gb), 0.0), dim=-1)
     else:
         rho_b = rho(ot_prob.epsilon, ot_prob.tau_b)
         div_b = -torch.sum(
-            torch.where(supp_b, ot_prob.b * phi_star(-(g - gb), rho_b), 0.0)
+            torch.where(supp_b, ot_prob.b * phi_star(-(g - gb), rho_b), 0.0),
+            dim=-1,
         )
 
     # Using https://arxiv.org/pdf/1910.12958.pdf (24)
     if lse_mode:
-        total_sum = torch.sum(ot_prob.marginal_from_potentials(f, g))
+        total_sum = torch.sum(ot_prob.marginal_from_potentials(f, g), dim=(-2, -1))
     else:
-        total_sum = torch.sum(ot_prob.marginal_from_scalings(f, g))
+        total_sum = torch.sum(ot_prob.marginal_from_scalings(f, g), dim=(-2, -1))
     return div_a + div_b + ot_prob.epsilon * (
-        torch.sum(ot_prob.a) * torch.sum(ot_prob.b) - total_sum
+        torch.sum(ot_prob.a, dim=-1) * torch.sum(ot_prob.b, dim=-1) - total_sum
     )
 
 
@@ -133,7 +135,7 @@ def recenter(
         if ot_prob.is_balanced:
             # center the potentials for numerical stability
             is_finite = torch.isfinite(f)
-            shift = torch.sum(torch.where(is_finite, f, 0.0)) / torch.sum(is_finite)
+            shift = torch.sum(torch.where(is_finite, f, 0.0), dim=-1, keepdim=True) / torch.sum(is_finite, dim=-1, keepdim=True)
             return f - shift, g + shift
 
         if ot_prob.tau_a == 1.0 or ot_prob.tau_b == 1.0:
@@ -145,8 +147,8 @@ def recenter(
         tau = rho_a * rho_b / (rho_a + rho_b)
 
         shift = tau * (
-            logsumexp(-f / rho_a, b=ot_prob.a) -
-            logsumexp(-g / rho_b, b=ot_prob.b)
+            logsumexp(-f / rho_a, b=ot_prob.a, dim=-1) -
+            logsumexp(-g / rho_b, b=ot_prob.b, dim=-1)
         )
         return f + shift, g - shift
 
@@ -218,19 +220,19 @@ class SinkhornOutput():
     @property
     def dual_cost(self) -> torch.Tensor:
         a, b = self.ot_prob.a, self.ot_prob.b
-        dual_cost = torch.sum(torch.where(a > 0.0, a * self.f, 0))
-        dual_cost += torch.sum(torch.where(b > 0.0, b * self.g, 0))
+        dual_cost = torch.sum(torch.where(a > 0.0, a * self.f, 0), dim=-1)
+        dual_cost += torch.sum(torch.where(b > 0.0, b * self.g, 0), dim=-1)
         return dual_cost
 
     @property
     def kl_reg_cost(self) -> float:
         return self.kl_reg_ot_cost
 
-    @property
-    def ent_reg_cost(self) -> float:
-        ent_a = torch.sum(torch.special.entr(self.ot_prob.a))
-        ent_b = torch.sum(torch.special.entr(self.ot_prob.b))
-        return self.kl_reg_ot_cost - self.epsilon * (ent_a + ent_b)
+    # @property  # NOTE(an): not compatible with batch
+    # def ent_reg_cost(self) -> float:
+    #     ent_a = torch.sum(torch.special.entr(self.ot_prob.a))
+    #     ent_b = torch.sum(torch.special.entr(self.ot_prob.b))
+    #     return self.kl_reg_ot_cost - self.epsilon * (ent_a + ent_b)
 
     @property
     def kl_reg_cost(self) -> float:
@@ -245,13 +247,13 @@ class SinkhornOutput():
         return self.ot_prob.b
 
     @property
-    def n_iters(self) -> int:
-        return torch.sum(self.errors != -1) * self.inner_iterations
+    def n_iters(self) -> torch.Tensor:
+        return torch.sum(self.errors != -1, dim=-1) * self.inner_iterations
 
     @property
-    def converged(self) -> bool:
-        return torch.any(self.costs == -1) and torch.all(torch.isfinite(self.costs))
-    
+    def converged(self) -> torch.Tensor:
+        return torch.any(self.costs == -1, dim=-1) and torch.all(torch.isfinite(self.costs), dim=-1)
+
     @property
     def scalings(self) -> Tuple[torch.Tensor, torch.Tensor]:
         u = self.ot_prob.scaling_from_potential(self.f)
@@ -269,8 +271,8 @@ class SinkhornOutput():
             return self.ot_prob.transport_from_scalings(*self.scalings)
 
     @property
-    def transport_mass(self) -> float:
-        return self.marginal(0).sum()
+    def transport_mass(self) -> torch.Tensor:
+        return self.marginal(-2).sum(dim=-1)
 
 
 class Momentum:
@@ -292,7 +294,7 @@ class Momentum:
             return self.value
         idx = self.start // self.inner_iterations
 
-        return self.lehmann(state) if iteration >= self.start and state.errors[idx - 1] < self.error_threshold \
+        return self.lehmann(state) if iteration >= self.start and state.errors[..., idx - 1] < self.error_threshold \
             else self.value
 
     def lehmann(self, state: SinkhornState) -> float:
@@ -301,7 +303,7 @@ class Momentum:
             sinkhorn algorithm. Optimization Letters, pages 1–12. eq. 5."""
         idx = self.start // self.inner_iterations
         error_ratio = torch.minimum(
-            state.errors[idx - 1] / state.errors[idx - 2], 0.99
+            state.errors[..., idx - 1] / state.errors[..., idx - 2], 0.99
         )
         power = 1.0 / self.inner_iterations
         return 2.0 / (1.0 + torch.sqrt(1.0 - error_ratio ** power))
@@ -388,9 +390,9 @@ class Sinkhorn:
 
         def smin(
             potential: torch.Tensor, marginal: torch.Tensor, tau: float
-        ) -> float:
+        ) -> torch.Tensor:
             r = rho(ot_prob.epsilon, tau)
-            return -r * logsumexp(-potential / r, b=marginal)
+            return -r * logsumexp(-potential / r, b=marginal, dim=-1)
 
         # only for an unbalanced problems with `tau_{a,b} < 1`
         recenter_potentials = (
@@ -406,7 +408,7 @@ class Sinkhorn:
 
         # update g potential
         new_gv = tau_b * ot_prob.update_potential(
-            old_fu, old_gv, safe_log(ot_prob.b), iteration, dim=0
+            old_fu, old_gv, safe_log(ot_prob.b), iteration, dim=-2
         )
         if recenter_potentials:
             new_gv -= k22 * smin(old_fu, ot_prob.a, tau_a)
@@ -418,7 +420,7 @@ class Sinkhorn:
 
         # update f potential
         new_fu = tau_a * ot_prob.update_potential(
-            old_fu, old_gv, safe_log(ot_prob.a), iteration, dim=1
+            old_fu, old_gv, safe_log(ot_prob.a), iteration, dim=-1
         )
         if recenter_potentials:
             new_fu -= k11 * smin(old_gv, ot_prob.b, tau_b)
@@ -436,14 +438,14 @@ class Sinkhorn:
         w = self.momentum.weight(state, iteration)
         old_gv = state.gv
         new_gv = ot_prob.update_scaling(
-            state.fu, ot_prob.b, iteration, dim=0
+            state.fu, ot_prob.b, iteration, dim=-1
         ) ** ot_prob.tau_b
         gv = self.momentum(w, state.gv, new_gv, self.lse_mode)
         new_fu = ot_prob.update_scaling(
             old_gv if self.parallel_dual_updates else gv,
             ot_prob.a,
             iteration,
-            dim=1
+            dim=-1
         ) ** ot_prob.tau_a
         fu = self.momentum(w, state.fu, new_fu, self.lse_mode)
 
@@ -475,21 +477,21 @@ class Sinkhorn:
             else:
                 err = -1
                 cost = -1
-            state.errors[it] = err
-            state.costs[it] = cost
+            state.errors[..., it] = err
+            state.costs[..., it] = cost
         return state
 
     def _converged(self, state: SinkhornState, iteration: int) -> bool:
         if iteration < self.min_iterations:
             return False
         it = iteration // self.inner_iterations
-        err = state.errors[it - 1]
-        return err < self.threshold
+        err = state.errors[..., it - 1]
+        return (err < self.threshold).all()
 
     def _diverged(self, state: SinkhornState, iteration: int) -> bool:
         it = iteration // self.inner_iterations
-        err = torch.isinf(state.errors[it - 1]) or torch.isnan(state.errors[it - 1])
-        cost = torch.isinf(state.costs[it - 1]) or torch.isnan(state.costs[it - 1])
+        err = torch.isinf(state.errors[..., it - 1]).any() or torch.isnan(state.errors[..., it - 1]).any()
+        cost = torch.isinf(state.costs[..., it - 1]).any() or torch.isnan(state.costs[..., it - 1]).any()
         return err or cost
 
     def _continue(self, state: SinkhornState, iteration: int) -> bool:
@@ -499,9 +501,10 @@ class Sinkhorn:
         self, init: Tuple[torch.Tensor, torch.Tensor]
     ) -> SinkhornState:
         fu, gv = init
+        batch_dim = fu.shape[:-1]
         total_size = np.ceil(self.max_iterations / self.inner_iterations).astype(int)
-        errors = -torch.ones(total_size).type_as(fu)
-        costs = -torch.ones(total_size).type_as(fu)
+        errors = -torch.ones(batch_dim + (total_size, )).type_as(fu)
+        costs = -torch.ones(batch_dim + (total_size, )).type_as(fu)
         state = SinkhornState(errors=errors, costs=costs, fu=fu, gv=gv)
         return state
 
@@ -541,22 +544,38 @@ if __name__ == "__main__":
     from torch_sinkhorn.problem import Epsilon
     from torch_robotics.torch_utils.torch_timer import TimerCUDA
     # epsilon = Epsilon(target=0.05, init=1., decay=0.8)
-    x = torch.tensor([[0.1, 0.2, 0.7], [0.3, 0.4, 0.3], [0.5, 0.3, 0.2]])
-    y = torch.tensor([[0.1, 0.2, 0.7], [0.3, 0.4, 0.3], [0.5, 0.3, 0.2]])
-    C = torch.cdist(x, y, p=2)
+    # x = torch.tensor([[0.1, 0.2, 0.7], [0.3, 0.4, 0.3], [0.5, 0.3, 0.2]])
+    # y = torch.tensor([[0.1, 0.2, 0.7], [0.3, 0.4, 0.3], [0.5, 0.3, 0.2]])
+    # C = torch.cdist(x, y, p=2)
+    batch = 32
+    C = torch.rand(batch, 100, 100)
     ot_prob = LinearProblem(
         C, epsilon=0.05
     )
-    sinkhorn = Sinkhorn(lse_mode=True, min_iterations=50, max_iterations=50, parallel_dual_updates=True, recenter_potentials=True)
+    sinkhorn = Sinkhorn(lse_mode=True, min_iterations=50, max_iterations=50, parallel_dual_updates=False, recenter_potentials=True)
     with TimerCUDA() as t:
         W, state = sinkhorn(ot_prob)
     print(t.elapsed)
     print(f"Converged at {state.converged_at}")
     import matplotlib.pyplot as plt
     plt.figure()
-    plt.plot(W.errors)
+    mean_errors = torch.mean(state.errors, dim=0)
+    var_errors = torch.var(state.errors, dim=0)
+    plt.errorbar(
+        torch.arange(mean_errors.shape[-1]),
+        mean_errors,
+        yerr=var_errors,
+        label="error"
+    )
     plt.figure()
-    plt.plot(W.costs)
+    mean_costs = torch.mean(state.costs, dim=0)
+    var_costs = torch.var(state.costs, dim=0)
+    plt.errorbar(
+        torch.arange(mean_costs.shape[-1]),
+        mean_costs,
+        yerr=var_costs,
+        label="cost"
+    )
     plt.figure()
-    plt.imshow(W.matrix.cpu().numpy())
+    plt.imshow(W.matrix.mean(0).cpu().numpy())
     plt.show()
