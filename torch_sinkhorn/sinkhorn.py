@@ -14,13 +14,7 @@ import numpy as np
 import torch
 from torch_sinkhorn.problem import LinearProblem
 from torch_sinkhorn.initializer import DefaultInitializer, RandomInitializer, SinkhornInitializer
-from torch_sinkhorn.utils import safe_log
-
-
-def logsumexp(x: torch.Tensor, b: torch.Tensor = None, dim: Tuple[int] = None) -> torch.Tensor:
-    if b is None:
-        b = torch.ones_like(x)
-    return safe_log(torch.sum(b * torch.exp(x), dim=dim))
+from torch_sinkhorn.utils import safe_log, logsumexp
 
 
 def phi_star(h: torch.Tensor, rho: float) -> torch.Tensor:
@@ -149,7 +143,7 @@ def recenter(
         shift = tau * (
             logsumexp(-f / rho_a, b=ot_prob.a, dim=-1) -
             logsumexp(-g / rho_b, b=ot_prob.b, dim=-1)
-        )
+        )[..., None]
         return f + shift, g - shift
 
 
@@ -411,8 +405,8 @@ class Sinkhorn:
             old_fu, old_gv, safe_log(ot_prob.b), iteration, dim=-2
         )
         if recenter_potentials:
-            new_gv -= k22 * smin(old_fu, ot_prob.a, tau_a)
-            new_gv += xi21 * smin(new_gv, ot_prob.b, tau_b)
+            new_gv -= k22 * smin(old_fu, ot_prob.a, tau_a)[..., None]
+            new_gv += xi21 * smin(new_gv, ot_prob.b, tau_b)[..., None]
         gv = self.momentum(w, old_gv, new_gv, self.lse_mode)
 
         if not self.parallel_dual_updates:
@@ -423,8 +417,8 @@ class Sinkhorn:
             old_fu, old_gv, safe_log(ot_prob.a), iteration, dim=-1
         )
         if recenter_potentials:
-            new_fu -= k11 * smin(old_gv, ot_prob.b, tau_b)
-            new_fu += xi12 * smin(new_fu, ot_prob.a, tau_a)
+            new_fu -= k11 * smin(old_gv, ot_prob.b, tau_b)[..., None]
+            new_fu += xi12 * smin(new_fu, ot_prob.a, tau_a)[..., None]
         fu = self.momentum(w, old_fu, new_fu, self.lse_mode)
 
         state.fu = fu
@@ -550,7 +544,8 @@ if __name__ == "__main__":
     batch = 32
     C = torch.rand(batch, 100, 100)
     ot_prob = LinearProblem(
-        C, epsilon=0.05
+        C, epsilon=0.05,
+        # tau_a=0.5, tau_b=0.5
     )
     sinkhorn = Sinkhorn(lse_mode=True, min_iterations=50, max_iterations=50, parallel_dual_updates=False, recenter_potentials=True)
     with TimerCUDA() as t:

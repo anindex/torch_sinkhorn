@@ -15,7 +15,72 @@ import torch
 from torch_sinkhorn.initializer_lr import LRInitializer, RandomInitializer, Rank2Initializer
 from torch_sinkhorn.problem import LinearProblem
 from torch_sinkhorn.sinkhorn import Sinkhorn
-from torch_sinkhorn.utils import safe_log, gen_js, gen_kl
+from torch_sinkhorn.utils import safe_log, gen_js, gen_kl, logsumexp
+
+
+class Constants(NamedTuple):  # noqa: D101
+    a: torch.Tensor
+    b: torch.Tensor
+    rho_a: float
+    rho_b: float
+    supp_a: Optional[torch.Tensor] = None
+    supp_b: Optional[torch.Tensor] = None
+
+
+def rho(tau: float) -> float:
+    return tau / (1.0 - tau)
+
+
+def get_ratio(rho: float, gamma: float) -> float:
+    gamma_inv = 1.0 / gamma
+    return rho / (rho + gamma_inv) if np.isfinite(rho) else 1.0
+
+
+def compute_lambdas(
+    const: Constants, 
+    u1: torch.Tensor, u2: torch.Tensor, v1: torch.Tensor, v2: torch.Tensor,
+    gamma: float, g: torch.Tensor,
+    lse_mode: bool
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    gamma_inv = 1.0 / gamma
+    rho_a = const.rho_a
+    rho_b = const.rho_b
+
+    if lse_mode:
+        num_1 = logsumexp((-gamma_inv / rho_a) * u1, b=const.a, dim=-1)
+        num_2 = logsumexp((-gamma_inv / rho_b) * u2, b=const.b, dim=-1)
+        den = torch.logsumexp(g - (v1 + v2), dim=-1)
+        const_1 = num_1 - den
+        const_2 = num_2 - den
+
+        ratio_1 = get_ratio(rho_a, gamma)
+        ratio_2 = get_ratio(rho_b, gamma)
+        harmonic = 1.0 / (1.0 - (ratio_1 * ratio_2))
+        lam_1 = harmonic * gamma_inv * ratio_1 * (const_1 - ratio_2 * const_2)
+        lam_2 = harmonic * gamma_inv * ratio_2 * (const_2 - ratio_1 * const_1)
+        return lam_1, lam_2
+
+    num_1 = torch.sum(
+        torch.where(
+            const.supp_a, ((u1 ** (-gamma_inv / rho_a)) * const.a), 0.0
+        ), dim=-1
+    )
+    num_2 = torch.sum(
+        torch.where(
+            const.supp_b, ((u2 ** (-gamma_inv / rho_b)) * const.b), 0.0
+        ), dim=-1
+    )
+    den = torch.sum(g / (v1 * v2), dim=-1)
+    const_1 = torch.log(num_1 / den)
+    const_2 = torch.log(num_2 / den)
+
+    ratio_1 = get_ratio(rho_a, gamma)
+    ratio_2 = get_ratio(rho_b, gamma)
+    harmonic = 1.0 / (1.0 - (ratio_1 * ratio_2))
+    lam_1 = harmonic * gamma_inv * ratio_1 * (const_1 - ratio_2 * const_2)
+    lam_2 = harmonic * gamma_inv * ratio_2 * (const_2 - ratio_1 * const_1)
+    return lam_1, lam_2
+
 
 
 class LRSinkhornState():
@@ -241,7 +306,7 @@ class LRSinkhorn(Sinkhorn):
         self,
         ot_prob: LinearProblem,
         state: LRSinkhornState,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         log_q, log_r, log_g = (
             safe_log(state.q), safe_log(state.r), safe_log(state.g)
         )
@@ -258,7 +323,7 @@ class LRSinkhorn(Sinkhorn):
         grad_r += self.epsilon * log_r
         grad_g += self.epsilon * log_g
 
-        if self.gamma_rescale:
+        if self.gamma_rescale:  # NOTE(an): this rescale works over batch dims
             norm_q = torch.max(torch.abs(grad_q)) ** 2
             norm_r = torch.max(torch.abs(grad_r)) ** 2
             norm_g = torch.max(torch.abs(grad_g)) ** 2
@@ -285,7 +350,7 @@ class LRSinkhorn(Sinkhorn):
         min_entry_value: float = 1e-6,
         tolerance: float = 5e-2,
         min_iter: int = 0,
-        max_iter: int = 200
+        max_iter: int = 50
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r = self.rank
         n, m = ot_prob.C.shape[-2:]
@@ -344,6 +409,93 @@ class LRSinkhorn(Sinkhorn):
             i += 1
         g = torch.exp(gamma * h)
         return q, r, g
+    
+    def unbalanced_dykstra_update_lse(
+        self,
+        c_q: torch.Tensor,
+        c_r: torch.Tensor,
+        c_g: torch.Tensor,
+        gamma: float,
+        ot_prob: LinearProblem,
+        translation_invariant: bool = True,
+        tolerance: float = 5e-2,
+        min_iter: int = 0,
+        max_iter: int = 50
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        r = self.rank
+        n, m = ot_prob.C.shape[-2:]
+        batch_dim = c_q.shape[:-2]
+        loga, logb = torch.log(ot_prob.a), torch.log(ot_prob.b)
+        err = torch.tensor(torch.inf)
+        const = Constants(
+            a=ot_prob.a, b=ot_prob.b, rho_a=rho(ot_prob.tau_a), rho_b=rho(ot_prob.tau_b),
+            supp_a=ot_prob.a > 0, supp_b=ot_prob.b > 0,
+        )
+        c_a = get_ratio(const.rho_a, gamma)
+        c_b = get_ratio(const.rho_b, gamma)
+        old_v1, old_v2 = torch.zeros(batch_dim + (r,)).type_as(loga), torch.zeros(batch_dim + (r,)).type_as(loga)
+        old_u1, old_u2 = torch.zeros(batch_dim + (n,)).type_as(loga), torch.zeros(batch_dim + (m,)).type_as(loga)
+
+        def error(
+            u1: torch.Tensor, u2: torch.Tensor, v1: torch.Tensor, v2: torch.Tensor,
+            old_u1: torch.Tensor, old_u2: torch.Tensor, old_v1: torch.Tensor, old_v2: torch.Tensor,
+            gamma: float,
+        ) -> torch.Tensor:
+            u1_err = torch.norm(u1 - old_u1, p=torch.inf, dim=-1)
+            u2_err = torch.norm(u2 - old_u2, p=torch.inf, dim=-1)
+            v1_err = torch.norm(v1 - old_v1, p=torch.inf, dim=-1)
+            v2_err = torch.norm(v2 - old_v2, p=torch.inf, dim=-1)
+            err = torch.max(torch.stack((u1_err, u2_err, v1_err, v2_err), dim=-1), dim=-1).values
+            return (1.0 / gamma) * err
+
+        def _softm(
+            v: torch.Tensor, c: torch.Tensor,
+            dim: int,
+        ) -> torch.Tensor:
+            v = v[..., :, None] if dim == -2 else v[..., None, :]
+            return torch.logsumexp(v + c, dim=dim)
+
+        i = 0
+        while i < max_iter:
+            if i >= min_iter and (err < tolerance).all():
+                break
+
+            if translation_invariant:
+                lam_a, lam_b = compute_lambdas(const, old_u1, old_u2, old_v1, old_v2, gamma, c_g, lse_mode=True)
+                u1 = c_a * (loga - _softm(old_v1, c_q, dim=-1))
+                u1 = u1 - lam_a[..., None] / ((1.0 / gamma) + const.rho_a)
+                u2 = c_b * (logb - _softm(old_v2, c_r, dim=-1))
+                u2 = u2 - lam_b[..., None] / ((1.0 / gamma) + const.rho_b)
+
+                lam_a, lam_b = compute_lambdas(
+                    const, u1, u2, old_v1, old_v2, gamma, c_g, lse_mode=True
+                )
+
+                v1_trans = _softm(u1, c_q, dim=-2)
+                v2_trans = _softm(u2, c_r, dim=-2)
+
+                g_trans = gamma * (lam_a[..., None] + lam_b[..., None]) + c_g
+            else:
+                u1 = c_a * (loga - _softm(old_v1, c_q, dim=-1))
+                u2 = c_b * (logb - _softm(old_v2, c_r, dim=-1))
+
+                v1_trans = _softm(u1, c_q, dim=-2)
+                v2_trans = _softm(u2, c_r, dim=-2)
+                g_trans = c_g
+
+            g = (1.0 / 3.0) * (g_trans + v1_trans + v2_trans)
+            v1 = g - v1_trans
+            v2 = g - v2_trans
+            err = error(u1, u2, v1, v2, old_u1, old_u2, old_v1, old_v2, gamma)
+            old_u1, old_u2 = u1, u2
+            old_v1, old_v2 = v1, v2
+            i += 1
+
+        q = torch.exp(u1[..., :, None] + c_q + v1[..., None, :])
+        r = torch.exp(u2[..., :, None] + c_r + v2[..., None, :])
+        g = torch.exp(g)
+        return q, r, g
 
     def dykstra_update_kernel(
         self,
@@ -355,7 +507,7 @@ class LRSinkhorn(Sinkhorn):
         min_entry_value: float = 1e-6,
         tolerance: float = 5e-2,
         min_iter: int = 0,
-        max_iter: int = 200
+        max_iter: int = 50
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r = self.rank
         n, m = ot_prob.C.shape[-2:]
@@ -403,17 +555,102 @@ class LRSinkhorn(Sinkhorn):
             i += 1
         return q, r, g
 
+    def unbalanced_dykstra_update_kernel(
+        self,
+        k_q: torch.Tensor,
+        k_r: torch.Tensor,
+        k_g: torch.Tensor,
+        gamma: float,
+        ot_prob: LinearProblem,
+        translation_invariant: bool = True,
+        tolerance: float = 5e-2,
+        min_iter: int = 0,
+        max_iter: int = 50
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        r = self.rank
+        n, m = ot_prob.C.shape[-2:]
+        batch_dim = ot_prob.C.shape[:-2]
+        a, b = ot_prob.a, ot_prob.b
+        supp_a, supp_b = a > 0, b > 0
+        err = torch.tensor(torch.inf)
+
+        const = Constants(
+            a=a, b=b, rho_a=rho(ot_prob.tau_a), rho_b=rho(ot_prob.tau_b),
+            supp_a=supp_a, supp_b=supp_b,
+        )
+        c_a = get_ratio(const.rho_a, gamma)
+        c_b = get_ratio(const.rho_b, gamma)
+        old_v1, old_v2 = torch.ones(batch_dim + (r,)).type_as(a), torch.ones(batch_dim + (r,)).type_as(a)
+        old_u1, old_u2 = torch.ones(batch_dim + (n,)).type_as(a), torch.ones(batch_dim + (m,)).type_as(a)
+
+        def error(
+            u1: torch.Tensor, u2: torch.Tensor, v1: torch.Tensor, v2: torch.Tensor,
+            old_u1: torch.Tensor, old_u2: torch.Tensor, old_v1: torch.Tensor, old_v2: torch.Tensor,
+            gamma: float,
+        ) -> float:
+            u1_err = torch.norm(torch.log(u1) - torch.log(old_u1), p=torch.inf, dim=-1)
+            u2_err = torch.norm(torch.log(u2) - torch.log(old_u2), p=torch.inf, dim=-1)
+            v1_err = torch.norm(torch.log(v1) - torch.log(old_v1), p=torch.inf, dim=-1)
+            v2_err = torch.norm(torch.log(v2) - torch.log(old_v2), p=torch.inf, dim=-1)
+            err = torch.max(torch.stack((u1_err, u2_err, v1_err, v2_err), dim=-1), dim=-1).values
+            return (1.0 / gamma) * err
+
+        i = 0
+        while i < max_iter:
+            if i >= min_iter and (err < tolerance).all():
+                break
+            
+            if translation_invariant:
+                lam_a, lam_b = compute_lambdas(const, old_u1, old_u2, old_v1, old_v2, gamma, k_g, lse_mode=False)
+                kq_v = torch.einsum("...ij,...j->...i", k_q, old_v1)
+                kr_v = torch.einsum("...ij,...j->...i", k_r, old_v2)
+                u1 = torch.where(const.supp_a, (const.a / kq_v) ** c_a, 0.0)
+                u1 = u1 * torch.exp(-lam_a[..., None] / ((1.0 / gamma) + const.rho_a))
+                u2 = torch.where(const.supp_b, (const.b / kr_v) ** c_b, 0.0)
+                u2 = u2 * torch.exp(-lam_b[..., None] / ((1.0 / gamma) + const.rho_b))
+
+                lam_a, lam_b = compute_lambdas(const, u1, u2, old_v1, old_v2, gamma, k_g, lse_mode=False)
+                v1_trans = torch.einsum("...ij,...j->...i", k_q.mT, u1)
+                v2_trans = torch.einsum("...ij,...j->...i", k_r.mT, u2)
+                k_trans = torch.exp(gamma * (lam_a[..., None] + lam_b[..., None])) * k_g
+                g = (k_trans * v1_trans * v2_trans) ** (1.0 / 3.0)
+            else:
+                kq_v = torch.einsum("...ij,...j->...i", k_q, old_v1)
+                kr_v = torch.einsum("...ij,...j->...i", k_r, old_v2)
+                u1 = torch.where(const.supp_a, (const.a / kq_v) ** c_a, 0.0)
+                u2 = torch.where(const.supp_b, (const.b / kr_v) ** c_b, 0.0)
+
+                v1_trans = torch.einsum("...ij,...j->...i", k_q.mT, u1)
+                v2_trans = torch.einsum("...ij,...j->...i", k_r.mT, u2)
+                g = (k_g * v1_trans * v2_trans) ** (1.0 / 3.0)
+            
+            v1 = g / v1_trans
+            v2 = g / v2_trans
+            err = error(u1, u2, v1, v2, old_u1, old_u2, old_v1, old_v2, gamma)
+            old_u1, old_u2 = u1, u2
+            old_v1, old_v2 = v1, v2
+            i += 1
+        
+        q = u1[..., :, None] * k_q * v1[..., None, :]
+        r = u2[..., :, None] * k_r * v2[..., None, :]
+        return q, r, g
+
     def lse_step(
         self, ot_prob: LinearProblem, state: LRSinkhornState,
         iteration: int
     ) -> LRSinkhornState:
         """LR Sinkhorn LSE update."""
-        # TODO: implement unbalanced case.
         c_q, c_r, c_g, gamma = self._get_costs(ot_prob, state)
-        c_q, c_r, h = c_q / -gamma, c_r / -gamma, c_g / gamma
-        q, r, g = self.dykstra_update_lse(
-            c_q, c_r, h, gamma, ot_prob, **self.kwargs_dys
-        )
+
+        if ot_prob.is_balanced:
+            c_q, c_r, h = c_q / -gamma, c_r / -gamma, c_g / gamma
+            q, r, g = self.dykstra_update_lse(
+                c_q, c_r, h, gamma, ot_prob, **self.kwargs_dys
+            )
+        else:
+            q, r, g = self.unbalanced_dykstra_update_lse(
+                c_q, c_r, c_g, gamma, ot_prob, **self.kwargs_dys
+            )
         state.q = q
         state.r = r
         state.g = g
@@ -425,12 +662,17 @@ class LRSinkhorn(Sinkhorn):
         iteration: int
     ) -> LRSinkhornState:
         """LR Sinkhorn Kernel update."""
-        # TODO: implement unbalanced case.
         c_q, c_r, c_g, gamma = self._get_costs(ot_prob, state)
         c_q, c_r, c_g = torch.exp(c_q), torch.exp(c_r), torch.exp(c_g)
-        q, r, g = self.dykstra_update_kernel(
-            c_q, c_r, c_g, gamma, ot_prob, **self.kwargs_dys
-        )
+
+        if ot_prob.is_balanced:
+            q, r, g = self.dykstra_update_kernel(
+                c_q, c_r, c_g, gamma, ot_prob, **self.kwargs_dys
+            )
+        else:
+            q, r, g = self.unbalanced_dykstra_update_kernel(
+                c_q, c_r, c_g, gamma, ot_prob, **self.kwargs_dys
+            )
         state.q = q
         state.r = r
         state.g = g
@@ -532,7 +774,8 @@ if __name__ == "__main__":
     batch = 32
     epsilon = Epsilon(target=0.05, init=1., decay=0.8)
     ot_prob = LinearProblem(
-        torch.rand((batch, 100, 100)), epsilon
+        torch.rand((batch, 100, 100)), epsilon,
+        # tau_a=0.5, tau_b=0.5
     )
     sinkhorn = LRSinkhorn(rank=2, min_iterations=50, max_iterations=50, lse_mode=False, inner_iterations=1)
     with TimerCUDA() as t:

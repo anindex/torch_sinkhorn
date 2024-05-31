@@ -36,6 +36,12 @@ def softmin(
     return -gamma * torch.logsumexp(x / -gamma, dim=dim)
 
 
+def logsumexp(x: torch.Tensor, b: torch.Tensor = None, dim: Tuple[int] = None) -> torch.Tensor:
+    if b is None:
+        b = torch.ones_like(x)
+    return safe_log(torch.sum(b * torch.exp(x), dim=dim))
+
+
 def sort_and_argsort(
     x: torch.Tensor,
     *,
