@@ -326,9 +326,9 @@ class Sinkhorn:
         min_iterations: int = 1,
         max_iterations: int = 100,
         parallel_dual_updates: bool = False,
-        recenter_potentials: bool = False,
+        recenter_potentials: bool = True,
         initializer: Literal["default", "random"] = "default",
-        use_danskin: bool = False,
+        use_danskin: bool = True,
         **kwargs: Any,
     ):
         self.lse_mode = lse_mode
