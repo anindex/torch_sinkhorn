@@ -3,6 +3,8 @@ from typing import TYPE_CHECKING, Optional, Sequence, Tuple, Union
 
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 def safe_log(
@@ -86,3 +88,27 @@ def lambertw(
         _, converged, w = halley_iteration((0, converged, w))
 
     return w
+
+
+def plot_coupling(
+    coupling: torch.Tensor,
+    *,
+    title: str = "",
+    xlabel: str = "",
+    ylabel: str = "",
+    cmap: str = "viridis",
+    ax = None,
+    **kwargs
+):
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    im = ax.imshow(coupling, cmap=cmap, **kwargs)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    fig.colorbar(im, cax=cax, orientation='vertical')
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+
+    return ax

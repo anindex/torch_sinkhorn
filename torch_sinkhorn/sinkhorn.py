@@ -536,6 +536,7 @@ class Sinkhorn:
 
 if __name__ == "__main__":
     from torch_sinkhorn.problem import Epsilon
+    from torch_sinkhorn.utils import plot_coupling
     from torch_robotics.torch_utils.torch_timer import TimerCUDA
     # epsilon = Epsilon(target=0.05, init=1., decay=0.8)
     # x = torch.tensor([[0.1, 0.2, 0.7], [0.3, 0.4, 0.3], [0.5, 0.3, 0.2]])
@@ -572,5 +573,5 @@ if __name__ == "__main__":
         label="cost"
     )
     plt.figure()
-    plt.imshow(W.matrix.mean(0).cpu().numpy())
+    plot_coupling(W.matrix[0])
     plt.show()
