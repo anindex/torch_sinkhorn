@@ -432,7 +432,7 @@ class Sinkhorn:
         w = self.momentum.weight(state, iteration)
         old_gv = state.gv
         new_gv = ot_prob.update_scaling(
-            state.fu, ot_prob.b, iteration, dim=-1
+            state.fu, ot_prob.b, iteration, dim=-2
         ) ** ot_prob.tau_b
         gv = self.momentum(w, state.gv, new_gv, self.lse_mode)
         new_fu = ot_prob.update_scaling(
