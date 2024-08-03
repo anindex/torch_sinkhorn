@@ -30,7 +30,9 @@ def cost_tensor(
         for j in range(i + 1, k):
             cost_m = torch.sum(torch.square(x_s[i][:, None] - x_s[j][None, :]), dim=-1)
             dim = list(range(i)) + list(range(i + 1, j)) + list(range(j + 1, k))
-            cost_t += torch.unsqueeze(cost_m, dim=dim)
+            for d in dim:  # TODO: improve this
+                cost_m = torch.unsqueeze(cost_m, dim=d)
+            cost_t += cost_m
     return cost_t
 
 
@@ -40,7 +42,11 @@ def remove_tensor_sum(
 
     k = len(u)
     for i in range(k):
-        c -= torch.unsqueeze(u[i], dim=list(range(i)) + list(range(i + 1, k)))
+        dim = list(range(i)) + list(range(i + 1, k))
+        u_i = u[i]
+        for d in dim:  # TODO: improve this
+            u_i = torch.unsqueeze(u_i, dim=d)
+        c -= u_i
     return c
 
 
@@ -139,11 +145,6 @@ class MMSinkhornOutput():
         return torch.sum(self.errors != -1) * self.inner_iterations
 
     @property
-    def cost_t(self) -> torch.Tensor:
-        """Cost tensor."""
-        return self.cost_t
-
-    @property
     def tensor(self) -> torch.Tensor:
         """Transport tensor."""
         return torch.exp(
@@ -201,8 +202,8 @@ class MMSinkhorn:
             assert n == a.shape[0], (n, a.shape[0])
 
         cost_t = cost_tensor(x_s)
-        errors = -torch.ones((self.max_iterations, 1)).type_as(cost_t)
-        costs = -torch.ones((self.max_iterations, 1)).type_as(cost_t)
+        errors = -torch.ones((self.max_iterations,)).type_as(cost_t)
+        costs = -torch.ones((self.max_iterations,)).type_as(cost_t)
         potentials = tuple(torch.zeros(n).type_as(cost_t) for n in n_s)
         state = MMSinkhornState(potentials=potentials, errors=errors, costs=costs)
         self.epsilon = 0.05 * torch.mean(cost_t) if epsilon is None else epsilon
@@ -299,23 +300,9 @@ if __name__ == "__main__":
     print(f"Converged at {state.converged_at}")
     import matplotlib.pyplot as plt
     plt.figure()
-    mean_errors = torch.mean(state.errors, dim=0)
-    var_errors = torch.var(state.errors, dim=0)
-    plt.errorbar(
-        torch.arange(mean_errors.shape[-1]),
-        mean_errors,
-        yerr=var_errors,
-        label="error"
-    )
+    plt.plot(state.errors[state.errors != -1])
     plt.figure()
-    mean_costs = torch.mean(state.costs, dim=0)
-    var_costs = torch.var(state.costs, dim=0)
-    plt.errorbar(
-        torch.arange(mean_costs.shape[-1]),
-        mean_costs,
-        yerr=var_costs,
-        label="cost"
-    )
-    plt.figure()
-    plot_coupling(W.matrix[0])
-    plt.show()
+    plt.plot(state.costs[state.costs != -1])
+    # plt.figure()
+    # plot_coupling(W.tensor[0])
+    # plt.show()
