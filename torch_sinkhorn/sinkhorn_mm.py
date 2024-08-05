@@ -100,11 +100,11 @@ class MMSinkhornState():
     ) -> float:
         coupl_tensor = coupling_tensor(self.potentials, cost_t, epsilon)
         marginals = tensor_marginals(coupl_tensor)
-        errors = torch.tensor([
-            torch.norm(marginal - a, p=norm, dim=-1)
+        errors = [
+            torch.norm(marginal - a, p=norm)
             for a, marginal in zip(a_s, marginals)
-        ]).type_as(cost_t)
-        return torch.sum(errors)
+        ]
+        return sum(errors)
 
     def ent_reg_cost(
         self, 
@@ -188,7 +188,9 @@ class MMSinkhorn:
         self,
         x_s: Tuple[torch.Tensor, ...],
         a_s: Optional[Tuple[torch.Tensor, ...]] = None,
-        epsilon: Optional[float] = None
+        epsilon: Optional[float] = None,
+        scale_cost: Optional[bool] = True,
+        scale: Optional[str] = 'max_cost',
     ) -> MMSinkhornOutput:
         n_s = [x.shape[0] for x in x_s]
 
@@ -202,6 +204,16 @@ class MMSinkhorn:
             assert n == a.shape[0], (n, a.shape[0])
 
         cost_t = cost_tensor(x_s)
+        # scale cost tensor
+        if scale_cost:
+            if scale == "mean":
+                cost_t = cost_t / torch.mean(cost_t)
+            elif scale == "max_cost":
+                cost_t = cost_t / torch.max(cost_t)
+            elif scale == "median":
+                cost_t = cost_t / torch.median(cost_t)
+            else:
+                cost_t = cost_t / scale
         errors = -torch.ones((self.max_iterations,)).type_as(cost_t)
         costs = -torch.ones((self.max_iterations,)).type_as(cost_t)
         potentials = tuple(torch.zeros(n).type_as(cost_t) for n in n_s)
@@ -236,7 +248,7 @@ class MMSinkhorn:
             app_lse = softmin(
                 remove_tensor_sum(cost_t, potentials), self.epsilon, dim=dim
             )
-            pot += self.epsilon * torch.log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
+            pot += self.epsilon * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
             return potentials[:l] + (pot,) + potentials[l + 1:]
 
         for l in range(k):
@@ -252,6 +264,7 @@ class MMSinkhorn:
             else:
                 err = -1
                 cost = -1
+            print(f"Iteration {iteration}: Error {err}, Cost {cost}")
             state.errors[..., it] = err
             state.costs[..., it] = cost
         return state
@@ -293,7 +306,7 @@ if __name__ == "__main__":
     x_s = [torch.rand(n, d) for n in n_s]
     a_s = None
 
-    sinkhorn = MMSinkhorn()
+    sinkhorn = MMSinkhorn(min_iterations=20, max_iterations=100, inner_iterations=1, threshold=1e-3)
     with TimerCUDA() as t:
         W, state = sinkhorn(x_s, a_s)
     print(t.elapsed)
@@ -305,4 +318,4 @@ if __name__ == "__main__":
     plt.plot(state.costs[state.costs != -1])
     # plt.figure()
     # plot_coupling(W.tensor[0])
-    # plt.show()
+    plt.show()
