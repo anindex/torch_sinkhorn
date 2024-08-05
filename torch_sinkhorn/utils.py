@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+import matplotlib.ticker as tkr
 
 
 def safe_log(
@@ -102,12 +103,11 @@ def plot_coupling(
 ):
     if ax is None:
         fig, ax = plt.subplots()
-
     im = ax.imshow(coupling, cmap=cmap, **kwargs)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    plt.colorbar(im, cax=cax, orientation='vertical')
-    ax.set_title(title)
+    plt.colorbar(im, cax=cax, orientation='vertical', format=tkr.FormatStrFormatter('%.2f'))
+    ax.set_title(title, fontsize = 35)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
 

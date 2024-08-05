@@ -13,8 +13,6 @@ from typing import (
 )
 import numpy as np
 import torch
-from torch_sinkhorn.problem import LinearProblem
-from torch_sinkhorn.initializer import DefaultInitializer, RandomInitializer, SinkhornInitializer
 from torch_sinkhorn.utils import safe_log, logsumexp, softmin
 
 
@@ -63,7 +61,7 @@ def tensor_marginal(coupling: torch.Tensor, slice_index: int) -> torch.Tensor:
 def coupling_tensor(
     potentials: Tuple[torch.Tensor], cost_t: torch.Tensor, epsilon: float
 ) -> torch.Tensor:
-  return torch.exp(-remove_tensor_sum(cost_t, potentials) / epsilon)
+    return torch.exp(-remove_tensor_sum(cost_t, potentials) / epsilon)
 
 
 def compute_ent_reg_cost(
@@ -71,8 +69,8 @@ def compute_ent_reg_cost(
 ) -> torch.Tensor:
     ent_reg_cost = 0.0
     for potential, a in zip(potentials, a_s):
-            pot = torch.where(torch.isfinite(potential), potential, 0)
-            ent_reg_cost += torch.sum(pot * a)
+        pot = torch.where(torch.isfinite(potential), potential, 0)
+        ent_reg_cost += torch.sum(pot * a)
 
     ent_reg_cost += epsilon * (1 - torch.sum(coupling_tensor(potentials, cost_t, epsilon)))
     return ent_reg_cost
@@ -175,6 +173,7 @@ class MMSinkhorn:
         inner_iterations: int = 1,
         min_iterations: int = 1,
         max_iterations: int = 100,
+        parallel_updates: bool = False,
         use_danskin: bool = True,
     ):
         self.threshold = threshold
@@ -182,6 +181,7 @@ class MMSinkhorn:
         self.min_iterations = min_iterations
         self.max_iterations = max_iterations
         self.norm = norm
+        self.parallel_updates = parallel_updates
         self.use_danskin = use_danskin
 
     def __call__(
@@ -218,7 +218,7 @@ class MMSinkhorn:
         costs = -torch.ones((self.max_iterations,)).type_as(cost_t)
         potentials = tuple(torch.zeros(n).type_as(cost_t) for n in n_s)
         state = MMSinkhornState(potentials=potentials, errors=errors, costs=costs)
-        self.epsilon = 0.05 * torch.mean(cost_t) if epsilon is None else epsilon
+        self.epsilon = 0.05 * torch.mean(cost_t) if epsilon is None else epsilon 
 
         final_state = self.iterations(cost_t, a_s, state)
         return self.output_from_state(cost_t, a_s, final_state), final_state
@@ -248,11 +248,23 @@ class MMSinkhorn:
             app_lse = softmin(
                 remove_tensor_sum(cost_t, potentials), self.epsilon, dim=dim
             )
-            pot += self.epsilon * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
+            pot += -self.epsilon * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
             return potentials[:l] + (pot,) + potentials[l + 1:]
 
-        for l in range(k):
-            state.potentials = one_slice(state.potentials, l, a_s[l])
+        def one_slice_potential(potentials: Tuple[torch.Tensor, ...], l: int, a: torch.Tensor):
+            pot = potentials[l]
+            dim = list(range(l)) + list(range(l + 1, k))
+            app_lse = softmin(
+                remove_tensor_sum(cost_t, potentials), self.epsilon, dim=dim
+            )
+            pot += -self.epsilon * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
+            return pot
+
+        if self.parallel_updates:
+            state.potentials = tuple(one_slice_potential(state.potentials, l, a_s[l]) for l in range(k))
+        else:
+            for l in range(k):
+                state.potentials = one_slice(state.potentials, l, a_s[l])
 
         if iteration % self.inner_iterations == 0:
             it = iteration // self.inner_iterations
@@ -304,11 +316,10 @@ if __name__ == "__main__":
     
     n_s, d = [6] * 4, 2
     x_s = [torch.rand(n, d) for n in n_s]
-    a_s = None
 
     sinkhorn = MMSinkhorn(min_iterations=20, max_iterations=100, inner_iterations=1, threshold=1e-3)
     with TimerCUDA() as t:
-        W, state = sinkhorn(x_s, a_s)
+        W, state = sinkhorn(x_s)
     print(t.elapsed)
     print(f"Converged at {state.converged_at}")
     import matplotlib.pyplot as plt
@@ -316,6 +327,5 @@ if __name__ == "__main__":
     plt.plot(state.errors[state.errors != -1])
     plt.figure()
     plt.plot(state.costs[state.costs != -1])
-    # plt.figure()
-    # plot_coupling(W.tensor[0])
+    plot_coupling(W.tensor[0, 0])
     plt.show()
