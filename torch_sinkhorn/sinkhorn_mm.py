@@ -38,7 +38,7 @@ def remove_tensor_sum(
     c: torch.Tensor, u: Tuple[torch.Tensor, ...]
 ) -> torch.Tensor:
 
-    k = len(u)
+    k = c.ndim
     for i in range(k):
         dim = list(range(i)) + list(range(i + 1, k))
         u_i = u[i]
@@ -248,7 +248,7 @@ class MMSinkhorn:
             app_lse = softmin(
                 remove_tensor_sum(cost_t, potentials), self.epsilon, dim=dim
             )
-            pot += -self.epsilon * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
+            pot += self.epsilon * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
             return potentials[:l] + (pot,) + potentials[l + 1:]
 
         def one_slice_potential(potentials: Tuple[torch.Tensor, ...], l: int, a: torch.Tensor):
@@ -257,7 +257,7 @@ class MMSinkhorn:
             app_lse = softmin(
                 remove_tensor_sum(cost_t, potentials), self.epsilon, dim=dim
             )
-            pot += -self.epsilon * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
+            pot += self.epsilon * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
             return pot
 
         if self.parallel_updates:
@@ -317,7 +317,7 @@ if __name__ == "__main__":
     n_s, d = [6] * 4, 2
     x_s = [torch.rand(n, d) for n in n_s]
 
-    sinkhorn = MMSinkhorn(min_iterations=20, max_iterations=100, inner_iterations=1, threshold=1e-3)
+    sinkhorn = MMSinkhorn(min_iterations=20, max_iterations=100, inner_iterations=1, threshold=1e-3, parallel_updates=False)
     with TimerCUDA() as t:
         W, state = sinkhorn(x_s)
     print(t.elapsed)
