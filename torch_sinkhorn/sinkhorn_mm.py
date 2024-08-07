@@ -13,7 +13,7 @@ from typing import (
 )
 import numpy as np
 import torch
-from torch_sinkhorn.utils import safe_log, logsumexp, softmin
+from torch_sinkhorn.utils import safe_log, safe_exp, logsumexp, softmin
 
 
 def cost_tensor(
@@ -61,7 +61,7 @@ def tensor_marginal(coupling: torch.Tensor, slice_index: int) -> torch.Tensor:
 def coupling_tensor(
     potentials: Tuple[torch.Tensor], cost_t: torch.Tensor, epsilon: float
 ) -> torch.Tensor:
-    return torch.exp(-remove_tensor_sum(cost_t, potentials) / epsilon)
+    return safe_exp(-remove_tensor_sum(cost_t, potentials) / epsilon)
 
 
 def compute_ent_reg_cost(
@@ -145,7 +145,7 @@ class MMSinkhornOutput():
     @property
     def tensor(self) -> torch.Tensor:
         """Transport tensor."""
-        return torch.exp(
+        return safe_exp(
             -remove_tensor_sum(self.cost_t, self.potentials) / self.epsilon
         )
 
@@ -317,7 +317,7 @@ if __name__ == "__main__":
     n_s, d = [6] * 4, 2
     x_s = [torch.rand(n, d) for n in n_s]
 
-    sinkhorn = MMSinkhorn(min_iterations=20, max_iterations=100, inner_iterations=1, threshold=1e-3, parallel_updates=False)
+    sinkhorn = MMSinkhorn(min_iterations=1, max_iterations=100, inner_iterations=1, threshold=1e-2, parallel_updates=False)
     with TimerCUDA() as t:
         W, state = sinkhorn(x_s)
     print(t.elapsed)

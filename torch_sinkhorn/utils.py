@@ -16,6 +16,14 @@ def safe_log(
     return torch.where(x > 0.0, torch.log(x), np.log(eps))
 
 
+def safe_exp(
+    x: torch.Tensor,
+    *,
+    eps: Optional[float] = 1e-12
+) -> torch.Tensor:
+    return torch.where(x > np.log(eps), torch.exp(x), eps)
+
+
 def kl(p: torch.Tensor, q: torch.Tensor) -> float:
     p = p.flatten()
     q = q.flatten()
@@ -34,15 +42,15 @@ def gen_js(p: torch.Tensor, q: torch.Tensor, c: float = 0.5) -> float:
 
 
 def softmin(
-    x: torch.Tensor, gamma: float, dim: Optional[int] = None
+    x: torch.Tensor, gamma: float, b: torch.Tensor = None, dim: Optional[int] = None
 ) -> torch.Tensor:
-    return -gamma * torch.logsumexp(x / -gamma, dim=dim)
+    return -gamma * logsumexp(x / -gamma, b=b, dim=dim)
 
 
 def logsumexp(x: torch.Tensor, b: torch.Tensor = None, dim: Tuple[int] = None) -> torch.Tensor:
     if b is None:
         b = torch.ones_like(x)
-    return safe_log(torch.sum(b * torch.exp(x), dim=dim))
+    return safe_log(torch.sum(b * safe_exp(x), dim=dim))
 
 
 def sort_and_argsort(
