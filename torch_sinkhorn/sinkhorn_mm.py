@@ -226,12 +226,13 @@ class MMSinkhorn:
     def output_from_state(
         self, cost_t: torch.Tensor, a_s: Tuple[torch.Tensor, ...], state: MMSinkhornState,
     ) -> torch.Tensor:
+        eps = self.epsilon.target if isinstance(self.epsilon, Epsilon) else self.epsilon
         return MMSinkhornOutput(
             state.potentials,
             state.costs,
             state.errors,
             cost_t, a_s,
-            self.epsilon,
+            eps,
             self.inner_iterations,
             self.use_danskin
         )
@@ -241,23 +242,24 @@ class MMSinkhorn:
         iteration: int, compute_error: bool = True
     ) -> MMSinkhornState:
         k = len(a_s)
+        eps = self.epsilon.at(iteration) if isinstance(self.epsilon, Epsilon) else self.epsilon
 
         def one_slice(potentials: Tuple[torch.Tensor, ...], l: int, a: torch.Tensor):
             pot = potentials[l]
             dim = list(range(l)) + list(range(l + 1, k))
             app_lse = softmin(
-                remove_tensor_sum(cost_t, potentials), self.epsilon, dim=dim
+                remove_tensor_sum(cost_t, potentials), eps, dim=dim
             )
-            pot += self.epsilon * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
+            pot += eps * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
             return potentials[:l] + (pot,) + potentials[l + 1:]
 
         def one_slice_potential(potentials: Tuple[torch.Tensor, ...], l: int, a: torch.Tensor):
             pot = potentials[l]
             dim = list(range(l)) + list(range(l + 1, k))
             app_lse = softmin(
-                remove_tensor_sum(cost_t, potentials), self.epsilon, dim=dim
+                remove_tensor_sum(cost_t, potentials), eps, dim=dim
             )
-            pot += self.epsilon * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
+            pot += eps * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
             return pot
 
         if self.parallel_updates:
@@ -270,9 +272,9 @@ class MMSinkhorn:
             it = iteration // self.inner_iterations
             if compute_error:
                 err = state.solution_error(
-                    cost_t, a_s, self.epsilon, norm=self.norm
+                    cost_t, a_s, eps, norm=self.norm
                 )
-                cost = state.ent_reg_cost(cost_t, a_s, self.epsilon)
+                cost = state.ent_reg_cost(cost_t, a_s, eps)
             else:
                 err = -1
                 cost = -1
@@ -316,6 +318,7 @@ if __name__ == "__main__":
     
     n_s, d = [6] * 4, 2
     x_s = [torch.rand(n, d) for n in n_s]
+    epsilon = Epsilon(target=0.5, init=1., decay=0.8)
 
     sinkhorn = MMSinkhorn(min_iterations=1, max_iterations=100, inner_iterations=1, threshold=1e-2, parallel_updates=False)
     with TimerCUDA() as t:
