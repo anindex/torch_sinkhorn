@@ -13,7 +13,7 @@ from typing import (
 )
 import numpy as np
 import torch
-from torch_sinkhorn.utils import safe_log, safe_exp, logsumexp, softmin
+from torch_sinkhorn.utils import safe_log, logsumexp, softmin
 
 
 def cost_tensor(
@@ -61,7 +61,7 @@ def tensor_marginal(coupling: torch.Tensor, slice_index: int) -> torch.Tensor:
 def coupling_tensor(
     potentials: Tuple[torch.Tensor], cost_t: torch.Tensor, epsilon: float
 ) -> torch.Tensor:
-    return safe_exp(-remove_tensor_sum(cost_t, potentials) / epsilon)
+    return torch.exp(-remove_tensor_sum(cost_t, potentials) / epsilon)
 
 
 def compute_ent_reg_cost(
@@ -145,7 +145,7 @@ class MMSinkhornOutput():
     @property
     def tensor(self) -> torch.Tensor:
         """Transport tensor."""
-        return safe_exp(
+        return torch.exp(
             -remove_tensor_sum(self.cost_t, self.potentials) / self.epsilon
         )
 
@@ -171,7 +171,7 @@ class MMSinkhorn:
         threshold: float = 1e-3,
         norm: float = 2.0,
         inner_iterations: int = 1,
-        min_iterations: int = 1,
+        min_iterations: int = 5,
         max_iterations: int = 100,
         parallel_updates: bool = False,
         use_danskin: bool = True,
@@ -278,7 +278,7 @@ class MMSinkhorn:
             else:
                 err = -1
                 cost = -1
-            print(f"Iteration {iteration}: Error {err}, Cost {cost}")
+            print(f"Iteration {it}: Error {err}, Cost {cost}")
             state.errors[..., it] = err
             state.costs[..., it] = cost
         return state
@@ -322,7 +322,7 @@ if __name__ == "__main__":
 
     sinkhorn = MMSinkhorn(min_iterations=1, max_iterations=100, inner_iterations=1, threshold=1e-2, parallel_updates=False)
     with TimerCUDA() as t:
-        W, state = sinkhorn(x_s)
+        W, state = sinkhorn(x_s, epsilon=1e-2)
     print(t.elapsed)
     print(f"Converged at {state.converged_at}")
     import matplotlib.pyplot as plt

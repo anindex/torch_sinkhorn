@@ -16,14 +16,6 @@ def safe_log(
     return torch.where(x > 0.0, torch.log(x), np.log(eps))
 
 
-def safe_exp(
-    x: torch.Tensor,
-    *,
-    eps: Optional[float] = 1e-12
-) -> torch.Tensor:
-    return torch.where(x > np.log(eps), torch.exp(x), eps)
-
-
 def kl(p: torch.Tensor, q: torch.Tensor) -> float:
     p = p.flatten()
     q = q.flatten()
@@ -42,16 +34,62 @@ def gen_js(p: torch.Tensor, q: torch.Tensor, c: float = 0.5) -> float:
 
 
 def softmin(
-    x: torch.Tensor, gamma: float, b: torch.Tensor = None, dim: Optional[int] = None
+    x: torch.Tensor, gamma: float, dim: Optional[int] = None
 ) -> torch.Tensor:
-    return -gamma * logsumexp(x / -gamma, b=b, dim=dim)
+    return -gamma * stable_logsumexp(x / -gamma, dim=dim)
 
 
 def logsumexp(x: torch.Tensor, b: torch.Tensor = None, dim: Tuple[int] = None) -> torch.Tensor:
     if b is None:
         b = torch.ones_like(x)
-    return safe_log(torch.sum(b * safe_exp(x), dim=dim))
+    return safe_log(torch.sum(b * torch.exp(x), dim=dim))
 
+
+def stable_logsumexp(a: torch.Tensor, b: torch.Tensor = None, dim: Tuple[int] = None, keepdim: bool = False) -> torch.Tensor:
+    if b is not None:
+        a, b = torch.broadcast_tensors(a, b)
+        if torch.any(b == 0):
+            a = a + 0.  # promote to at least float
+            a[b == 0] = -torch.inf
+
+    a_max = torch.amax(a.real, dim=dim, keepdim=True)
+
+    if a_max.ndim > 0:
+        a_max[~torch.isfinite(a_max)] = 0
+    elif not torch.isfinite(a_max):
+        a_max = 0
+
+    if b is not None:
+        b = torch.asarray(b)
+        tmp = b * torch.exp(a - a_max)
+    else:
+        tmp = torch.exp(a - a_max)
+
+    # suppress warnings about log of zero
+    s = torch.sum(tmp, dim=dim, keepdim=keepdim)
+    out = torch.log(s)
+
+    if not keepdim:
+        a_max = torch.squeeze(a_max, dim=dim)
+    out += a_max
+    return out
+
+
+def stable_logsumexp2(a: torch.Tensor, dim: Tuple[int] = None, keepdim: bool = False) -> torch.Tensor:
+    if dim is not None:
+        m = torch.amax(a, dim=dim, keepdim=True)
+        value0 = a - m
+        if keepdim is False:
+            m = m.squeeze(dim)
+        return m + torch.log(torch.sum(torch.exp(value0),
+                                       dim=dim, keepdim=keepdim))
+    else:
+        m = torch.amax(a)
+        sum_exp = torch.sum(torch.exp(a - m))
+        if isinstance(sum_exp, Number):
+            return m + math.log(sum_exp)
+        else:
+            return m + torch.log(sum_exp)
 
 def sort_and_argsort(
     x: torch.Tensor,
