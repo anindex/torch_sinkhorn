@@ -36,7 +36,7 @@ def gen_js(p: torch.Tensor, q: torch.Tensor, c: float = 0.5) -> float:
 def softmin(
     x: torch.Tensor, gamma: float, dim: Optional[int] = None
 ) -> torch.Tensor:
-    return -gamma * stable_logsumexp(x / -gamma, dim=dim)
+    return -gamma * torch.logsumexp(x / -gamma, dim=dim)
 
 
 def logsumexp(x: torch.Tensor, b: torch.Tensor = None, dim: Tuple[int] = None) -> torch.Tensor:
@@ -52,7 +52,7 @@ def stable_logsumexp(a: torch.Tensor, b: torch.Tensor = None, dim: Tuple[int] = 
             a = a + 0.  # promote to at least float
             a[b == 0] = -torch.inf
 
-    a_max = torch.amax(a.real, dim=dim, keepdim=True)
+    a_max = torch.amax(a, dim=dim, keepdim=True)
 
     if a_max.ndim > 0:
         a_max[~torch.isfinite(a_max)] = 0
@@ -60,7 +60,6 @@ def stable_logsumexp(a: torch.Tensor, b: torch.Tensor = None, dim: Tuple[int] = 
         a_max = 0
 
     if b is not None:
-        b = torch.asarray(b)
         tmp = b * torch.exp(a - a_max)
     else:
         tmp = torch.exp(a - a_max)

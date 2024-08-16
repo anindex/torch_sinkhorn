@@ -35,7 +35,7 @@ def cost_tensor(
 
 
 def remove_tensor_sum(
-    c: torch.Tensor, u: Tuple[torch.Tensor, ...]
+    c: torch.Tensor, u: List[torch.Tensor]
 ) -> torch.Tensor:
 
     k = c.ndim
@@ -44,7 +44,7 @@ def remove_tensor_sum(
         u_i = u[i]
         for d in dim:  # TODO: improve this
             u_i = torch.unsqueeze(u_i, dim=d)
-        c -= u_i
+        c = c - u_i
     return c
 
 
@@ -59,13 +59,13 @@ def tensor_marginal(coupling: torch.Tensor, slice_index: int) -> torch.Tensor:
 
 
 def coupling_tensor(
-    potentials: Tuple[torch.Tensor], cost_t: torch.Tensor, epsilon: float
+    potentials: List[torch.Tensor], cost_t: torch.Tensor, epsilon: float
 ) -> torch.Tensor:
     return torch.exp(-remove_tensor_sum(cost_t, potentials) / epsilon)
 
 
 def compute_ent_reg_cost(
-    potentials: Tuple[torch.Tensor], cost_t: torch.Tensor, a_s: Tuple[torch.Tensor, ...], epsilon: float
+    potentials: List[torch.Tensor], cost_t: torch.Tensor, a_s: Tuple[torch.Tensor, ...], epsilon: float
 ) -> torch.Tensor:
     ent_reg_cost = 0.0
     for potential, a in zip(potentials, a_s):
@@ -80,7 +80,7 @@ class MMSinkhornState():
 
     def __init__(
         self,
-        potentials: Tuple[torch.Tensor, ...],
+        potentials: List[torch.Tensor],
         errors: torch.Tensor = None,
         costs: torch.Tensor = None,
     ):
@@ -117,7 +117,7 @@ class MMSinkhornOutput():
     
     def __init__(
         self,
-        potentials: Tuple[torch.Tensor, ...],
+        potentials: List[torch.Tensor],
         costs: torch.Tensor,
         errors: torch.Tensor,
         cost_t: torch.Tensor,
@@ -216,7 +216,7 @@ class MMSinkhorn:
                 cost_t = cost_t / scale
         errors = -torch.ones((self.max_iterations,)).type_as(cost_t)
         costs = -torch.ones((self.max_iterations,)).type_as(cost_t)
-        potentials = tuple(torch.zeros(n).type_as(cost_t) for n in n_s)
+        potentials = [torch.zeros(n).type_as(cost_t) for n in n_s]
         state = MMSinkhornState(potentials=potentials, errors=errors, costs=costs)
         self.epsilon = 0.05 * torch.mean(cost_t) if epsilon is None else epsilon 
 
@@ -244,29 +244,27 @@ class MMSinkhorn:
         k = len(a_s)
         eps = self.epsilon.at(iteration) if isinstance(self.epsilon, Epsilon) else self.epsilon
 
-        def one_slice(potentials: Tuple[torch.Tensor, ...], l: int, a: torch.Tensor):
-            pot = potentials[l]
+        def one_slice(potentials: List[torch.Tensor], l: int, a: torch.Tensor):
             dim = list(range(l)) + list(range(l + 1, k))
             app_lse = softmin(
                 remove_tensor_sum(cost_t, potentials), eps, dim=dim
             )
-            pot += eps * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
-            return potentials[:l] + (pot,) + potentials[l + 1:]
+            potentials[l] += eps * torch.log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
 
-        def one_slice_potential(potentials: Tuple[torch.Tensor, ...], l: int, a: torch.Tensor):
+        def one_slice_potential(potentials: List[torch.Tensor], l: int, a: torch.Tensor) -> torch.Tensor:
             pot = potentials[l]
             dim = list(range(l)) + list(range(l + 1, k))
             app_lse = softmin(
                 remove_tensor_sum(cost_t, potentials), eps, dim=dim
             )
-            pot += eps * safe_log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
-            return pot
+            new_pot = pot + eps * torch.log(a) + torch.where(torch.isfinite(app_lse), app_lse, 0)
+            return new_pot
 
         if self.parallel_updates:
-            state.potentials = tuple(one_slice_potential(state.potentials, l, a_s[l]) for l in range(k))
+            state.potentials = [one_slice_potential(state.potentials, l, a_s[l]) for l in range(k)]
         else:
             for l in range(k):
-                state.potentials = one_slice(state.potentials, l, a_s[l])
+                one_slice(state.potentials, l, a_s[l])
 
         if iteration % self.inner_iterations == 0:
             it = iteration // self.inner_iterations
@@ -320,9 +318,9 @@ if __name__ == "__main__":
     x_s = [torch.rand(n, d) for n in n_s]
     epsilon = Epsilon(target=0.5, init=1., decay=0.8)
 
-    sinkhorn = MMSinkhorn(min_iterations=1, max_iterations=100, inner_iterations=1, threshold=1e-2, parallel_updates=False)
+    sinkhorn = MMSinkhorn(min_iterations=1, max_iterations=50, inner_iterations=1, threshold=1e-2)
     with TimerCUDA() as t:
-        W, state = sinkhorn(x_s, epsilon=1e-2)
+        W, state = sinkhorn(x_s)
     print(t.elapsed)
     print(f"Converged at {state.converged_at}")
     import matplotlib.pyplot as plt
